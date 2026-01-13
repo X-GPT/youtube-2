@@ -55,5 +55,11 @@
 			"tag": "v1",
 			"new_sqlite_classes": ["MyContainer"]
 		}
+	],
+	"services": [
+		{
+			"binding": "BROWSER_WORKER",
+			"service": "browser-worker"
+		}
 	]
 }

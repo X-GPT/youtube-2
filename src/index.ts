@@ -12,6 +12,47 @@ export class MyContainer extends Container {
 	sleepAfter = "2h";
 }
 
+function extractVideoId(url: string): string {
+	const match = url.match(
+		/.*(?:youtu.be\/|v\/|u\/\w\/|embed\/|watch\?v=|shorts\/|live\/)([^#&?]*).*/,
+	);
+	if (match !== null && match[1].length === 11) {
+		return match[1];
+	} else {
+		throw new Error("Failed to get youtube video id from the url");
+	}
+}
+
+async function loadURLMeta(env: CloudflareBindings, url: string) {
+	const params = {
+		url: url,
+	};
+	// Prepare the request to the browser worker
+	const searchParams = new URLSearchParams(params);
+	const requestUrl = `https://browser-worker.bruce-waynezu.workers.dev/?${searchParams.toString()}`;
+
+	// @ts-expect-error
+	const response = await env.BROWSER_WORKER.internalFetch(
+		new Request(requestUrl),
+	);
+
+	if (!response.ok) {
+		throw new Error(
+			`Failed to get URL: ${response.status} ${response.statusText}`,
+		);
+	}
+
+	const d = (await response.json()) as {
+		content: { og_image: string; title: string };
+	}[];
+	const content = d[0]?.content || {};
+
+	return {
+		thumbnail_url: content.og_image,
+		title: content.title,
+	};
+}
+
 const app = new Hono<{ Bindings: CloudflareBindings }>();
 
 // Middleware to verify the bearer token
@@ -49,15 +90,31 @@ app.get("/", sValidator("query", schema), async (c) => {
 		const text = await response.text();
 
 		// Try to parse as JSON, handle non-JSON responses
-		let data: unknown;
+		let data: { success: boolean; transcript: string };
 		try {
-			data = JSON.parse(text);
+			data = JSON.parse(text) as { success: boolean; transcript: string };
 		} catch {
-			return c.json({ error: text || "Container returned invalid response" }, 500);
+			return c.json(
+				{ error: text || "Container returned invalid response" },
+				500,
+			);
 		}
 
+		const { thumbnail_url, title } = await loadURLMeta(c.env, url);
+		const metadata: {
+			thumbnail_url: string;
+			title: string;
+			source: string;
+			description?: string;
+			view_count?: number;
+			author?: string;
+		} = { thumbnail_url, title, source: extractVideoId(url) };
+
 		// Return response with same status code
-		return c.json(data, response.status as 200 | 400 | 403 | 404 | 429 | 500 | 504);
+		return c.json(
+			{ content: data.transcript, metadata },
+			response.status as 200 | 400 | 403 | 404 | 429 | 500 | 504,
+		);
 	} catch (e) {
 		if (e instanceof Error) {
 			console.error(e);
