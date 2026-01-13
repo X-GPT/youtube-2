@@ -31,26 +31,41 @@ async function loadURLMeta(env: CloudflareBindings, url: string) {
 	const searchParams = new URLSearchParams(params);
 	const requestUrl = `https://browser-worker.bruce-waynezu.workers.dev/?${searchParams.toString()}`;
 
-	// @ts-expect-error
-	const response = await env.BROWSER_WORKER.internalFetch(
-		new Request(requestUrl),
-	);
-
-	if (!response.ok) {
-		throw new Error(
-			`Failed to get URL: ${response.status} ${response.statusText}`,
+	// Read response as text first to avoid deserialization issues
+	let text: string | undefined;
+	try {
+		// @ts-expect-error
+		const response = await env.BROWSER_WORKER.internalFetch(
+			new Request(requestUrl),
 		);
+
+		if (!response.ok) {
+			throw new Error(
+				`Failed to get URL: ${response.status} ${response.statusText}`,
+			);
+		}
+
+		// Read response as text first to avoid deserialization issues
+		text = await response.text();
+		if (!text) {
+			text = '[{ "content": { "og_image": "", "title": "" } }]';
+		}
+		const d: { content: { og_image: string; title: string } }[] =
+			JSON.parse(text);
+		const content = d[0]?.content || {};
+
+		return {
+			thumbnail_url: content.og_image,
+			title: content.title,
+		};
+	} catch (e) {
+		console.error({
+			message: "Failed to parse metadata response",
+			text: text || "No text",
+			error: e,
+		});
+		throw new Error(`Failed to parse metadata response: ${text || "No text"}`);
 	}
-
-	const d = (await response.json()) as {
-		content: { og_image: string; title: string };
-	}[];
-	const content = d[0]?.content || {};
-
-	return {
-		thumbnail_url: content.og_image,
-		title: content.title,
-	};
 }
 
 const app = new Hono<{ Bindings: CloudflareBindings }>();
@@ -85,14 +100,28 @@ app.get("/", sValidator("query", schema), async (c) => {
 			transcriptUrl.searchParams.set("lang", lang);
 		}
 
+		console.log({
+			message: "Fetching transcript from container",
+			transcriptUrl: transcriptUrl.toString(),
+		});
 		// Fetch from container
 		const response = await container.fetch(transcriptUrl.toString());
+		console.log({ message: "Response from container", response });
 		const text = await response.text();
+		console.log({ message: "Text from container", text });
 
 		// Try to parse as JSON, handle non-JSON responses
-		let data: { success: boolean; transcript: string };
+		let data: {
+			success: boolean;
+			transcript: string;
+			metadata?: {
+				description?: string;
+				view_count?: number;
+				author?: string;
+			};
+		};
 		try {
-			data = JSON.parse(text) as { success: boolean; transcript: string };
+			data = JSON.parse(text);
 		} catch {
 			return c.json(
 				{ error: text || "Container returned invalid response" },
@@ -102,13 +131,20 @@ app.get("/", sValidator("query", schema), async (c) => {
 
 		const { thumbnail_url, title } = await loadURLMeta(c.env, url);
 		const metadata: {
-			thumbnail_url: string;
+			thumbnail_url?: string;
 			title: string;
 			source: string;
 			description?: string;
 			view_count?: number;
 			author?: string;
-		} = { thumbnail_url, title, source: extractVideoId(url) };
+		} = {
+			source: extractVideoId(url),
+			thumbnail_url,
+			title,
+			description: data.metadata?.description,
+			view_count: data.metadata?.view_count,
+			author: data.metadata?.author,
+		};
 
 		// Return response with same status code
 		return c.json(

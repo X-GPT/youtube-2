@@ -204,6 +204,31 @@ function selectBestLanguage(info: SubtitleInfo): SelectedLanguage | null {
 	return null;
 }
 
+// Get video metadata using yt-dlp
+async function getVideoMetadata(videoId: string): Promise<{
+	description: string;
+	view_count: number;
+	author: string;
+}> {
+	const result =
+		await $`/usr/local/bin/yt-dlp --skip-download --no-warnings --no-playlist --print "%(.{description,view_count,uploader})#j" "https://www.youtube.com/watch?v=${videoId}"`
+			.nothrow()
+			.quiet();
+
+	if (result.exitCode !== 0) {
+		throw parseYtDlpError(result.stderr.toString());
+	}
+
+	const output = result.stdout.toString().trim();
+	const data = JSON.parse(output);
+
+	return {
+		description: data.description ?? "",
+		view_count: data.view_count ?? 0,
+		author: data.uploader ?? "",
+	};
+}
+
 // Timeout wrapper
 async function withTimeout<T>(
 	promise: Promise<T>,
@@ -379,11 +404,22 @@ app.get("/transcript", async (c) => {
 	}
 
 	try {
+		console.log({ message: "Downloading transcript" });
 		const result = await withTimeout(
 			downloadAndParseTranscript(url, lang),
 			30000, // 30 second timeout
 			"Transcript download timed out",
 		);
+		console.log({ message: "Downloading transcript", result });
+
+		// Fetch video metadata
+		console.log({ message: "Fetching video metadata" });
+		const videoMetadata = await withTimeout(
+			getVideoMetadata(result.videoId),
+			15000, // 15 second timeout for metadata
+			"Metadata fetch timed out",
+		);
+		console.log({ message: "Video metadata", videoMetadata });
 
 		return c.json({
 			success: true,
@@ -394,6 +430,9 @@ app.get("/transcript", async (c) => {
 				language: result.detectedLanguage,
 				wasAutoDetected: result.wasAutoDetected,
 				availableLanguages: result.availableLanguages,
+				description: videoMetadata.description,
+				view_count: videoMetadata.view_count,
+				author: videoMetadata.author,
 			},
 		});
 	} catch (error) {
@@ -411,4 +450,7 @@ app.get("/transcript", async (c) => {
 	}
 });
 
-export default app;
+export default {
+	fetch: app.fetch,
+	idleTimeout: 60, // 60 seconds to handle slow yt-dlp operations
+};

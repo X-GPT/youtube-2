@@ -3,11 +3,13 @@
 FROM oven/bun:1 AS base
 WORKDIR /usr/src/app
 
+RUN echo "Installing dependencies..."
+
 # Install yt-dlp, ffmpeg, and python3 (required by yt-dlp)
 RUN apt-get update && apt-get install -y curl ffmpeg python3 \
     && curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp \
     && chmod a+rx /usr/local/bin/yt-dlp \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* 
 
 # install dependencies into temp directory
 # this will cache them and speed up future builds
