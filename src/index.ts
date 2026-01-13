@@ -26,7 +26,7 @@ app.use(
 
 const schema = z.object({
 	url: z.url(),
-	lang: z.string().optional().default("en"),
+	lang: z.string().optional(), // If omitted, container will auto-detect
 });
 
 app.get("/", sValidator("query", schema), async (c) => {
@@ -39,7 +39,10 @@ app.get("/", sValidator("query", schema), async (c) => {
 		// Build URL with query params
 		const transcriptUrl = new URL("/transcript", "http://container");
 		transcriptUrl.searchParams.set("url", url);
-		transcriptUrl.searchParams.set("lang", lang);
+		// Only set lang if explicitly provided
+		if (lang) {
+			transcriptUrl.searchParams.set("lang", lang);
+		}
 
 		// Fetch from container
 		const response = await container.fetch(transcriptUrl.toString());

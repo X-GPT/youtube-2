@@ -3,6 +3,18 @@ import { Hono } from "hono";
 
 const app = new Hono();
 
+// Type definitions for yt-dlp subtitle info
+interface SubtitleInfo {
+	language: string | null;
+	subtitles: Record<string, unknown[]>;
+	automatic_captions: Record<string, unknown[]>;
+}
+
+interface SelectedLanguage {
+	lang: string;
+	isManual: boolean;
+}
+
 // Error class for transcript-specific errors
 class TranscriptError extends Error {
 	constructor(
@@ -140,6 +152,58 @@ function parseYtDlpError(stderr: string): TranscriptError {
 	return new TranscriptError(`yt-dlp error: ${stderr}`, "UNKNOWN", 500);
 }
 
+// Get available subtitles metadata from yt-dlp
+async function getAvailableSubtitles(url: string): Promise<SubtitleInfo> {
+	const result =
+		await $`/usr/local/bin/yt-dlp --skip-download --no-warnings --no-playlist --print "%(.{language,subtitles,automatic_captions})#j" ${url}`
+			.nothrow()
+			.quiet();
+
+	if (result.exitCode !== 0) {
+		throw parseYtDlpError(result.stderr.toString());
+	}
+
+	const output = result.stdout.toString().trim();
+	const data = JSON.parse(output);
+
+	return {
+		language: data.language ?? null,
+		subtitles: data.subtitles ?? {},
+		automatic_captions: data.automatic_captions ?? {},
+	};
+}
+
+// Select best available language based on priority
+function selectBestLanguage(info: SubtitleInfo): SelectedLanguage | null {
+	const { language: originalLang, subtitles, automatic_captions } = info;
+	const manualLangs = Object.keys(subtitles);
+	const autoLangs = Object.keys(automatic_captions);
+
+	// Priority 1: Manual in original language
+	if (originalLang && manualLangs.includes(originalLang)) {
+		return { lang: originalLang, isManual: true };
+	}
+	// Priority 2: Manual in English
+	const enManual = manualLangs.find((l) => l.startsWith("en"));
+	if (enManual) return { lang: enManual, isManual: true };
+
+	// Priority 3: Any manual
+	if (manualLangs.length > 0) return { lang: manualLangs[0], isManual: true };
+
+	// Priority 4: Auto in original language
+	if (originalLang && autoLangs.includes(originalLang)) {
+		return { lang: originalLang, isManual: false };
+	}
+	// Priority 5: Auto in English
+	const enAuto = autoLangs.find((l) => l.startsWith("en"));
+	if (enAuto) return { lang: enAuto, isManual: false };
+
+	// Priority 6: Any auto
+	if (autoLangs.length > 0) return { lang: autoLangs[0], isManual: false };
+
+	return null;
+}
+
 // Timeout wrapper
 async function withTimeout<T>(
 	promise: Promise<T>,
@@ -186,15 +250,49 @@ async function findSubtitleFile(
 // Download and parse transcript
 async function downloadAndParseTranscript(
 	url: string,
-	lang: string,
+	lang?: string,
 ): Promise<{
 	transcript: string;
 	videoId: string;
 	subtitleType: "manual" | "auto";
+	detectedLanguage: string;
+	wasAutoDetected: boolean;
+	availableLanguages?: string[];
 }> {
 	const videoId = extractVideoId(url);
 	if (!videoId) {
 		throw new TranscriptError("Could not extract video ID", "INVALID_URL", 400);
+	}
+
+	let targetLang: string;
+	let wasAutoDetected = false;
+	let availableLanguages: string[] | undefined;
+
+	// Auto-detection logic when lang is not specified or is "auto"
+	if (!lang || lang === "auto") {
+		const subtitleInfo = await getAvailableSubtitles(url);
+
+		// Collect all available languages for metadata
+		availableLanguages = Array.from(
+			new Set([
+				...Object.keys(subtitleInfo.subtitles),
+				...Object.keys(subtitleInfo.automatic_captions),
+			]),
+		);
+
+		const selected = selectBestLanguage(subtitleInfo);
+		if (!selected) {
+			throw new TranscriptError(
+				"No subtitles available for this video",
+				"NO_SUBTITLES",
+				404,
+			);
+		}
+
+		targetLang = selected.lang;
+		wasAutoDetected = true;
+	} else {
+		targetLang = lang;
 	}
 
 	const outputDir = `/tmp/subs/${videoId}_${Date.now()}`;
@@ -207,7 +305,7 @@ async function downloadAndParseTranscript(
 		const result = await $`/usr/local/bin/yt-dlp \
       --write-sub \
       --write-auto-sub \
-      --sub-lang ${lang} \
+      --sub-lang ${targetLang} \
       --sub-format vtt \
       --skip-download \
       --no-warnings \
@@ -223,10 +321,10 @@ async function downloadAndParseTranscript(
 		}
 
 		// Find the subtitle file
-		const subtitleFile = await findSubtitleFile(outputDir, videoId, lang);
+		const subtitleFile = await findSubtitleFile(outputDir, videoId, targetLang);
 		if (!subtitleFile) {
 			throw new TranscriptError(
-				`No subtitles available for language: ${lang}`,
+				`No subtitles available for language: ${targetLang}`,
 				"NO_SUBTITLES",
 				404,
 			);
@@ -244,6 +342,9 @@ async function downloadAndParseTranscript(
 			transcript,
 			videoId,
 			subtitleType: subtitleFile.type,
+			detectedLanguage: targetLang,
+			wasAutoDetected,
+			availableLanguages,
 		};
 	} finally {
 		// Cleanup temp directory
@@ -257,7 +358,9 @@ app.get("/", (c) => c.json({ status: "ok" }));
 // Transcript endpoint
 app.get("/transcript", async (c) => {
 	const url = c.req.query("url");
-	const lang = c.req.query("lang") ?? "en";
+	const langParam = c.req.query("lang");
+	// Treat "auto" or undefined as auto-detection mode
+	const lang = langParam === "auto" ? undefined : langParam;
 
 	// Validate URL presence
 	if (!url) {
@@ -288,7 +391,9 @@ app.get("/transcript", async (c) => {
 			metadata: {
 				videoId: result.videoId,
 				subtitleType: result.subtitleType,
-				language: lang,
+				language: result.detectedLanguage,
+				wasAutoDetected: result.wasAutoDetected,
+				availableLanguages: result.availableLanguages,
 			},
 		});
 	} catch (error) {
