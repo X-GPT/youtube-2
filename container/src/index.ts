@@ -62,8 +62,8 @@ function extractVideoId(url: string): string | null {
 			return parsed.searchParams.get("v");
 		}
 
-		// Handle /v/, /embed/, /shorts/ URLs
-		const pathMatch = parsed.pathname.match(/^\/(v|embed|shorts)\/([^/?]+)/);
+		// Handle /v/, /embed/, /shorts/, /live/ URLs
+		const pathMatch = parsed.pathname.match(/^\/(v|embed|shorts|live)\/([^/?]+)/);
 		if (pathMatch) {
 			return pathMatch[2];
 		}
