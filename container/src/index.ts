@@ -176,8 +176,15 @@ async function getAvailableSubtitles(url: string): Promise<SubtitleInfo> {
 // Select best available language based on priority
 function selectBestLanguage(info: SubtitleInfo): SelectedLanguage | null {
 	const { language: originalLang, subtitles, automatic_captions } = info;
-	const manualLangs = Object.keys(subtitles);
-	const autoLangs = Object.keys(automatic_captions);
+
+	// Filter out non-language entries like "live_chat" that YouTube returns for live streams
+	const invalidLangs = ["live_chat"];
+	const manualLangs = Object.keys(subtitles).filter(
+		(l) => !invalidLangs.includes(l),
+	);
+	const autoLangs = Object.keys(automatic_captions).filter(
+		(l) => !invalidLangs.includes(l),
+	);
 
 	// Priority 1: Manual in original language
 	if (originalLang && manualLangs.includes(originalLang)) {
