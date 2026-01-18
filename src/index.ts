@@ -9,7 +9,7 @@ const INSTANCE_COUNT = 10;
 
 export class MyContainer extends Container {
 	defaultPort = 3000;
-	sleepAfter = "2h";
+	sleepAfter = "5m";
 }
 
 function extractVideoId(url: string): string {
