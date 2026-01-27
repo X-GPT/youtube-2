@@ -64,7 +64,10 @@ async function loadURLMeta(env: CloudflareBindings, url: string) {
 			text: text || "No text",
 			error: e,
 		});
-		throw new Error(`Failed to parse metadata response: ${text || "No text"}`);
+		return {
+			thumbnail_url: "",
+			title: "",
+		};
 	}
 }
 
