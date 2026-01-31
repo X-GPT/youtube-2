@@ -63,7 +63,9 @@ function extractVideoId(url: string): string | null {
 		}
 
 		// Handle /v/, /embed/, /shorts/, /live/ URLs
-		const pathMatch = parsed.pathname.match(/^\/(v|embed|shorts|live)\/([^/?]+)/);
+		const pathMatch = parsed.pathname.match(
+			/^\/(v|embed|shorts|live)\/([^/?]+)/,
+		);
 		if (pathMatch) {
 			return pathMatch[2];
 		}
@@ -137,19 +139,27 @@ function parseYtDlpError(stderr: string): TranscriptError {
 		stderr.includes("is not a valid URL") ||
 		stderr.includes("Incomplete YouTube ID")
 	) {
-		return new TranscriptError("Video not found", "VIDEO_NOT_FOUND", 404);
+		return new TranscriptError(
+			`Video not found: ${stderr.trim()}`,
+			"VIDEO_NOT_FOUND",
+			404,
+		);
 	}
 	if (stderr.includes("429") || stderr.includes("Too Many Requests")) {
-		return new TranscriptError("Rate limited by YouTube", "RATE_LIMITED", 429);
+		return new TranscriptError(
+			`Rate limited by YouTube: ${stderr.trim()}`,
+			"RATE_LIMITED",
+			429,
+		);
 	}
 	if (stderr.includes("Private video") || stderr.includes("Sign in")) {
 		return new TranscriptError(
-			"Video is private or requires authentication",
+			`Video is private or requires authentication: ${stderr.trim()}`,
 			"ACCESS_DENIED",
 			403,
 		);
 	}
-	return new TranscriptError(`yt-dlp error: ${stderr}`, "UNKNOWN", 500);
+	return new TranscriptError(`yt-dlp error: ${stderr.trim()}`, "UNKNOWN", 500);
 }
 
 // Get available subtitles metadata from yt-dlp
