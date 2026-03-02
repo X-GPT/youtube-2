@@ -246,7 +246,9 @@ function selectLanguagePriorities(info: SubtitleInfo): SelectedLanguage[] {
 		}
 	}
 	// Priority 5: Auto in English
-	const enAuto = autoLangs.find((l) => l === "en" || l.startsWith("en-") && !l.endsWith("-orig"));
+	const enAuto = autoLangs.find(
+		(l) => l === "en" || (l.startsWith("en-") && !l.endsWith("-orig")),
+	);
 	if (enAuto) add("en", false);
 
 	// Priority 7: Any remaining auto
@@ -545,10 +547,7 @@ async function downloadAndParseTranscript(
 				availableLanguages,
 			};
 		} catch (error) {
-			if (
-				error instanceof TranscriptError &&
-				error.code === "RATE_LIMITED"
-			) {
+			if (error instanceof TranscriptError && error.code === "RATE_LIMITED") {
 				lastError = error;
 				continue;
 			}
@@ -560,7 +559,11 @@ async function downloadAndParseTranscript(
 	// Auto-translated subtitles hit YouTube's translation API which is aggressively rate-limited,
 	// but the original language subtitle is pre-generated and more likely to succeed.
 	try {
-		const result = await tryDownloadOriginalSubtitle(url, videoId, subtitleInfo.language ?? "en");
+		const result = await tryDownloadOriginalSubtitle(
+			url,
+			videoId,
+			subtitleInfo.language ?? "en",
+		);
 		return {
 			transcript: result.transcript,
 			videoId,
