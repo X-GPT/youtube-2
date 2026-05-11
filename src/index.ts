@@ -109,9 +109,16 @@ app.get("/", sValidator("query", schema), async (c) => {
 		});
 		// Fetch from container
 		const response = await container.fetch(transcriptUrl.toString());
-		console.log({ message: "Response from container", response });
 		const text = await response.text();
-		console.log({ message: "Text from container", text });
+		const log = response.ok ? console.log : console.error;
+		log({
+			message: "Response from container",
+			status: response.status,
+			statusText: response.statusText,
+			ok: response.ok,
+			headers: Object.fromEntries(response.headers),
+			body: text,
+		});
 
 		// Try to parse as JSON, handle non-JSON responses
 		let data: {
