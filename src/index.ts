@@ -3,9 +3,26 @@ import { sValidator } from "@hono/standard-validator";
 
 import { Hono } from "hono";
 import { bearerAuth } from "hono/bearer-auth";
+import type { ContentfulStatusCode } from "hono/utils/http-status";
 import z from "zod";
 
 const INSTANCE_COUNT = 10;
+
+type ContainerResponse =
+	| {
+			success: true;
+			transcript: string;
+			metadata?: {
+				description?: string;
+				view_count?: number;
+				author?: string;
+			};
+	  }
+	| {
+			success: false;
+			error: string;
+			code?: string;
+	  };
 
 export class MyContainer extends Container {
 	defaultPort = 3000;
@@ -120,21 +137,25 @@ app.get("/", sValidator("query", schema), async (c) => {
 			body: text,
 		});
 
-		// Try to parse as JSON, handle non-JSON responses
-		let data: {
-			success: boolean;
-			transcript: string;
-			metadata?: {
-				description?: string;
-				view_count?: number;
-				author?: string;
-			};
-		};
+		let data: ContainerResponse;
 		try {
 			data = JSON.parse(text);
 		} catch {
 			return c.json(
 				{ error: text || "Container returned invalid response" },
+				500,
+			);
+		}
+
+		const status = response.status as ContentfulStatusCode;
+
+		if (data.success === false) {
+			return c.json({ error: data.error, code: data.code }, status);
+		}
+
+		if (typeof data.transcript !== "string") {
+			return c.json(
+				{ error: "Container returned malformed success response" },
 				500,
 			);
 		}
@@ -156,11 +177,7 @@ app.get("/", sValidator("query", schema), async (c) => {
 			author: data.metadata?.author,
 		};
 
-		// Return response with same status code
-		return c.json(
-			{ content: data.transcript, metadata },
-			response.status as 200 | 400 | 403 | 404 | 429 | 500 | 504,
-		);
+		return c.json({ content: data.transcript, metadata }, status);
 	} catch (e) {
 		if (e instanceof Error) {
 			console.error(e);
