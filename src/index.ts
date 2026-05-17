@@ -127,15 +127,24 @@ app.get("/", sValidator("query", schema), async (c) => {
 		// Fetch from container
 		const response = await container.fetch(transcriptUrl.toString());
 		const text = await response.text();
-		const log = response.ok ? console.log : console.error;
-		log({
-			message: "Response from container",
-			status: response.status,
-			statusText: response.statusText,
-			ok: response.ok,
-			headers: Object.fromEntries(response.headers),
-			body: text,
-		});
+		if (response.ok) {
+			console.log({
+				message: "Response from container",
+				status: response.status,
+				statusText: response.statusText,
+				ok: response.ok,
+				headers: Object.fromEntries(response.headers),
+			});
+		} else {
+			console.error({
+				message: "Response from container",
+				status: response.status,
+				statusText: response.statusText,
+				ok: response.ok,
+				headers: Object.fromEntries(response.headers),
+				body: text,
+			});
+		}
 
 		let data: ContainerResponse;
 		try {
