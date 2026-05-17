@@ -5,11 +5,14 @@ WORKDIR /usr/src/app
 
 RUN echo "Installing dependencies..."
 
-# Install yt-dlp, ffmpeg, and python3 (required by yt-dlp)
+# Install yt-dlp, ffmpeg, python3 (required by yt-dlp), and deno
 ARG YT_DLP_VERSION=2026.03.17
-RUN apt-get update && apt-get install -y curl ffmpeg python3 \
+ARG DENO_VERSION=v2.1.4
+RUN apt-get update && apt-get install -y curl ffmpeg python3 unzip \
     && curl -fsSL https://github.com/yt-dlp/yt-dlp/releases/download/${YT_DLP_VERSION}/yt-dlp -o /usr/local/bin/yt-dlp \
     && chmod a+rx /usr/local/bin/yt-dlp \
+    && curl -fsSL https://deno.land/install.sh | DENO_INSTALL=/usr/local sh -s ${DENO_VERSION} \
+    && apt-get purge -y unzip && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/*
 
 # install dependencies into temp directory
