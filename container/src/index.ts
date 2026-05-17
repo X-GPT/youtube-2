@@ -165,7 +165,7 @@ function parseYtDlpError(stderr: string): TranscriptError {
 // Get available subtitles metadata from yt-dlp
 async function getAvailableSubtitles(url: string): Promise<SubtitleInfo> {
 	const result =
-		await $`/usr/local/bin/yt-dlp --skip-download --no-warnings --no-playlist --print "%(.{language,subtitles,automatic_captions})#j" ${url}`
+		await $`/usr/local/bin/yt-dlp --sleep-requests 1 --skip-download --no-warnings --no-playlist --print "%(.{language,subtitles,automatic_captions})#j" ${url}`
 			.nothrow()
 			.quiet();
 
@@ -264,7 +264,7 @@ async function getVideoMetadata(videoId: string): Promise<{
 	author: string;
 }> {
 	const result =
-		await $`/usr/local/bin/yt-dlp --skip-download --no-warnings --no-playlist --print "%(.{description,view_count,uploader})#j" "https://www.youtube.com/watch?v=${videoId}"`
+		await $`/usr/local/bin/yt-dlp --sleep-requests 1 --skip-download --no-warnings --no-playlist --print "%(.{description,view_count,uploader})#j" "https://www.youtube.com/watch?v=${videoId}"`
 			.nothrow()
 			.quiet();
 
@@ -376,6 +376,7 @@ async function tryDownloadSubtitle(
 
 	try {
 		const result = await $`/usr/local/bin/yt-dlp \
+      --sleep-requests 1 \
       --write-sub \
       --write-auto-sub \
       --sub-lang ${targetLang} \
@@ -433,6 +434,7 @@ async function tryDownloadOriginalSubtitle(
 
 	try {
 		const result = await $`/usr/local/bin/yt-dlp \
+      --sleep-requests 1 \
       --write-auto-sub \
       --sub-lang ${baseLang} \
       --sub-format vtt \
