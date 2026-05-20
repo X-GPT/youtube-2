@@ -10,6 +10,12 @@ interface SubtitleInfo {
 	automatic_captions: Record<string, unknown[]>;
 }
 
+interface VideoMetadata {
+	description: string;
+	view_count: number;
+	author: string;
+}
+
 interface SelectedLanguage {
 	lang: string;
 	isManual: boolean;
@@ -162,10 +168,13 @@ function parseYtDlpError(stderr: string): TranscriptError {
 	return new TranscriptError(`yt-dlp error: ${stderr.trim()}`, "UNKNOWN", 500);
 }
 
-// Get available subtitles metadata from yt-dlp
-async function getAvailableSubtitles(url: string): Promise<SubtitleInfo> {
+// Subtitle listing and video metadata both come from yt-dlp's info extractor
+// on the same URL, so we fetch them together to avoid a redundant round-trip.
+async function getVideoInfo(
+	url: string,
+): Promise<{ subtitles: SubtitleInfo; metadata: VideoMetadata }> {
 	const result =
-		await $`/usr/local/bin/yt-dlp --sleep-requests 1 --skip-download --no-warnings --no-playlist --print "%(.{language,subtitles,automatic_captions})#j" ${url}`
+		await $`/usr/local/bin/yt-dlp --sleep-requests 1 --skip-download --no-warnings --no-playlist --print "%(.{language,subtitles,automatic_captions,description,view_count,uploader})#j" ${url}`
 			.nothrow()
 			.quiet();
 
@@ -177,9 +186,16 @@ async function getAvailableSubtitles(url: string): Promise<SubtitleInfo> {
 	const data = JSON.parse(output);
 
 	return {
-		language: data.language ?? null,
-		subtitles: data.subtitles ?? {},
-		automatic_captions: data.automatic_captions ?? {},
+		subtitles: {
+			language: data.language ?? null,
+			subtitles: data.subtitles ?? {},
+			automatic_captions: data.automatic_captions ?? {},
+		},
+		metadata: {
+			description: data.description ?? "",
+			view_count: data.view_count ?? 0,
+			author: data.uploader ?? "",
+		},
 	};
 }
 
@@ -257,29 +273,9 @@ function selectLanguagePriorities(info: SubtitleInfo): SelectedLanguage[] {
 	return results;
 }
 
-// Get video metadata using yt-dlp
-async function getVideoMetadata(videoId: string): Promise<{
-	description: string;
-	view_count: number;
-	author: string;
-}> {
-	const result =
-		await $`/usr/local/bin/yt-dlp --sleep-requests 1 --skip-download --no-warnings --no-playlist --print "%(.{description,view_count,uploader})#j" "https://www.youtube.com/watch?v=${videoId}"`
-			.nothrow()
-			.quiet();
-
-	if (result.exitCode !== 0) {
-		throw parseYtDlpError(result.stderr.toString());
-	}
-
-	const output = result.stdout.toString().trim();
-	const data = JSON.parse(output);
-
-	return {
-		description: data.description ?? "",
-		view_count: data.view_count ?? 0,
-		author: data.uploader ?? "",
-	};
+async function getVideoMetadata(url: string): Promise<VideoMetadata> {
+	const { metadata } = await getVideoInfo(url);
+	return metadata;
 }
 
 // Timeout wrapper
@@ -477,18 +473,21 @@ async function tryDownloadOriginalSubtitle(
 	}
 }
 
-// Download and parse transcript
-async function downloadAndParseTranscript(
-	url: string,
-	lang?: string,
-): Promise<{
+interface TranscriptResult {
 	transcript: string;
 	videoId: string;
 	subtitleType: "manual" | "auto";
 	detectedLanguage: string;
 	wasAutoDetected: boolean;
 	availableLanguages?: string[];
-}> {
+	metadata: VideoMetadata;
+}
+
+// Download and parse transcript
+async function downloadAndParseTranscript(
+	url: string,
+	lang?: string,
+): Promise<TranscriptResult> {
 	const videoId = extractVideoId(url);
 	if (!videoId) {
 		throw new TranscriptError("Could not extract video ID", "INVALID_URL", 400);
@@ -496,22 +495,22 @@ async function downloadAndParseTranscript(
 
 	// When a specific language is requested, try it directly (no fallback)
 	if (lang && lang !== "auto") {
-		const { transcript, subtitleType } = await tryDownloadSubtitle(
-			url,
-			videoId,
-			lang,
-		);
+		const [download, metadata] = await Promise.all([
+			tryDownloadSubtitle(url, videoId, lang),
+			getVideoMetadata(url),
+		]);
 		return {
-			transcript,
+			transcript: download.transcript,
 			videoId,
-			subtitleType,
+			subtitleType: download.subtitleType,
 			detectedLanguage: lang,
 			wasAutoDetected: false,
+			metadata,
 		};
 	}
 
 	// Auto-detection: get available subtitles and try languages in priority order
-	const subtitleInfo = await getAvailableSubtitles(url);
+	const { subtitles: subtitleInfo, metadata } = await getVideoInfo(url);
 
 	const availableLanguages = Array.from(
 		new Set([
@@ -547,6 +546,7 @@ async function downloadAndParseTranscript(
 				detectedLanguage: selected.lang,
 				wasAutoDetected: true,
 				availableLanguages,
+				metadata,
 			};
 		} catch (error) {
 			if (error instanceof TranscriptError && error.code === "RATE_LIMITED") {
@@ -573,6 +573,7 @@ async function downloadAndParseTranscript(
 			detectedLanguage: result.detectedLanguage,
 			wasAutoDetected: true,
 			availableLanguages,
+			metadata,
 		};
 	} catch (error) {
 		if (error instanceof TranscriptError && error.code === "RATE_LIMITED") {
@@ -622,19 +623,10 @@ app.get("/transcript", async (c) => {
 		console.log({ message: "Downloading transcript" });
 		const result = await withTimeout(
 			downloadAndParseTranscript(url, lang),
-			30000, // 30 second timeout
+			50000, // must stay under server idleTimeout (60s)
 			"Transcript download timed out",
 		);
 		console.log({ message: "Downloading transcript", result });
-
-		// Fetch video metadata
-		console.log({ message: "Fetching video metadata" });
-		const videoMetadata = await withTimeout(
-			getVideoMetadata(result.videoId),
-			15000, // 15 second timeout for metadata
-			"Metadata fetch timed out",
-		);
-		console.log({ message: "Video metadata", videoMetadata });
 
 		return c.json({
 			success: true,
@@ -645,9 +637,9 @@ app.get("/transcript", async (c) => {
 				language: result.detectedLanguage,
 				wasAutoDetected: result.wasAutoDetected,
 				availableLanguages: result.availableLanguages,
-				description: videoMetadata.description,
-				view_count: videoMetadata.view_count,
-				author: videoMetadata.author,
+				description: result.metadata.description,
+				view_count: result.metadata.view_count,
+				author: result.metadata.author,
 			},
 		});
 	} catch (error) {
