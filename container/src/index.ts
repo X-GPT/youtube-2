@@ -273,11 +273,6 @@ function selectLanguagePriorities(info: SubtitleInfo): SelectedLanguage[] {
 	return results;
 }
 
-async function getVideoMetadata(url: string): Promise<VideoMetadata> {
-	const { metadata } = await getVideoInfo(url);
-	return metadata;
-}
-
 // Timeout wrapper
 async function withTimeout<T>(
 	promise: Promise<T>,
@@ -473,45 +468,45 @@ async function tryDownloadOriginalSubtitle(
 	}
 }
 
-interface TranscriptResult {
-	transcript: string;
+interface Transcript {
+	text: string;
 	videoId: string;
 	subtitleType: "manual" | "auto";
 	detectedLanguage: string;
 	wasAutoDetected: boolean;
 	availableLanguages?: string[];
-	metadata: VideoMetadata;
 }
 
-// Download and parse transcript
-async function downloadAndParseTranscript(
+type FetchTranscriptArgs =
+	| { lang: string }
+	| { subtitleInfo: SubtitleInfo };
+
+async function fetchTranscript(
 	url: string,
-	lang?: string,
-): Promise<TranscriptResult> {
+	args: FetchTranscriptArgs,
+): Promise<Transcript> {
 	const videoId = extractVideoId(url);
 	if (!videoId) {
 		throw new TranscriptError("Could not extract video ID", "INVALID_URL", 400);
 	}
 
 	// When a specific language is requested, try it directly (no fallback)
-	if (lang && lang !== "auto") {
-		const [download, metadata] = await Promise.all([
-			tryDownloadSubtitle(url, videoId, lang),
-			getVideoMetadata(url),
-		]);
-		return {
-			transcript: download.transcript,
+	if ("lang" in args) {
+		const { transcript, subtitleType } = await tryDownloadSubtitle(
+			url,
 			videoId,
-			subtitleType: download.subtitleType,
-			detectedLanguage: lang,
+			args.lang,
+		);
+		return {
+			text: transcript,
+			videoId,
+			subtitleType,
+			detectedLanguage: args.lang,
 			wasAutoDetected: false,
-			metadata,
 		};
 	}
 
-	// Auto-detection: get available subtitles and try languages in priority order
-	const { subtitles: subtitleInfo, metadata } = await getVideoInfo(url);
-
+	const { subtitleInfo } = args;
 	const availableLanguages = Array.from(
 		new Set([
 			...Object.keys(subtitleInfo.subtitles),
@@ -540,13 +535,12 @@ async function downloadAndParseTranscript(
 				selected.lang,
 			);
 			return {
-				transcript,
+				text: transcript,
 				videoId,
 				subtitleType,
 				detectedLanguage: selected.lang,
 				wasAutoDetected: true,
 				availableLanguages,
-				metadata,
 			};
 		} catch (error) {
 			if (error instanceof TranscriptError && error.code === "RATE_LIMITED") {
@@ -567,13 +561,12 @@ async function downloadAndParseTranscript(
 			subtitleInfo.language ?? "en",
 		);
 		return {
-			transcript: result.transcript,
+			text: result.transcript,
 			videoId,
 			subtitleType: result.subtitleType,
 			detectedLanguage: result.detectedLanguage,
 			wasAutoDetected: true,
 			availableLanguages,
-			metadata,
 		};
 	} catch (error) {
 		if (error instanceof TranscriptError && error.code === "RATE_LIMITED") {
@@ -591,6 +584,24 @@ async function downloadAndParseTranscript(
 					))
 		);
 	}
+}
+
+async function fetchTranscriptAndMetadata(
+	url: string,
+	lang: string | undefined,
+): Promise<{ transcript: Transcript; metadata: VideoMetadata }> {
+	if (lang) {
+		const [transcript, { metadata }] = await Promise.all([
+			fetchTranscript(url, { lang }),
+			getVideoInfo(url),
+		]);
+		return { transcript, metadata };
+	}
+	const info = await getVideoInfo(url);
+	const transcript = await fetchTranscript(url, {
+		subtitleInfo: info.subtitles,
+	});
+	return { transcript, metadata: info.metadata };
 }
 
 // Health check endpoint
@@ -621,25 +632,30 @@ app.get("/transcript", async (c) => {
 
 	try {
 		console.log({ message: "Downloading transcript" });
-		const result = await withTimeout(
-			downloadAndParseTranscript(url, lang),
+		const { transcript, metadata } = await withTimeout(
+			fetchTranscriptAndMetadata(url, lang),
 			50000, // must stay under server idleTimeout (60s)
 			"Transcript download timed out",
 		);
-		console.log({ message: "Downloading transcript", result });
+		console.log({
+			message: "Downloaded transcript",
+			videoId: transcript.videoId,
+			detectedLanguage: transcript.detectedLanguage,
+			length: transcript.text.length,
+		});
 
 		return c.json({
 			success: true,
-			transcript: result.transcript,
+			transcript: transcript.text,
 			metadata: {
-				videoId: result.videoId,
-				subtitleType: result.subtitleType,
-				language: result.detectedLanguage,
-				wasAutoDetected: result.wasAutoDetected,
-				availableLanguages: result.availableLanguages,
-				description: result.metadata.description,
-				view_count: result.metadata.view_count,
-				author: result.metadata.author,
+				videoId: transcript.videoId,
+				subtitleType: transcript.subtitleType,
+				language: transcript.detectedLanguage,
+				wasAutoDetected: transcript.wasAutoDetected,
+				availableLanguages: transcript.availableLanguages,
+				description: metadata.description,
+				view_count: metadata.view_count,
+				author: metadata.author,
 			},
 		});
 	} catch (error) {
