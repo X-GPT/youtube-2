@@ -590,17 +590,12 @@ async function fetchTranscriptAndMetadata(
 	url: string,
 	lang: string | undefined,
 ): Promise<{ transcript: Transcript; metadata: VideoMetadata }> {
-	if (lang) {
-		const [transcript, { metadata }] = await Promise.all([
-			fetchTranscript(url, { lang }),
-			getVideoInfo(url),
-		]);
-		return { transcript, metadata };
-	}
+	// Run yt-dlp sequentially on the same URL — concurrent invocations against
+	// one video can compound YouTube's per-IP rate-limiting.
 	const info = await getVideoInfo(url);
-	const transcript = await fetchTranscript(url, {
-		subtitleInfo: info.subtitles,
-	});
+	const transcript = lang
+		? await fetchTranscript(url, { lang })
+		: await fetchTranscript(url, { subtitleInfo: info.subtitles });
 	return { transcript, metadata: info.metadata };
 }
 
