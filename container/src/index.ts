@@ -483,13 +483,9 @@ type FetchTranscriptArgs =
 
 async function fetchTranscript(
 	url: string,
+	videoId: string,
 	args: FetchTranscriptArgs,
 ): Promise<Transcript> {
-	const videoId = extractVideoId(url);
-	if (!videoId) {
-		throw new TranscriptError("Could not extract video ID", "INVALID_URL", 400);
-	}
-
 	// When a specific language is requested, try it directly (no fallback)
 	if ("lang" in args) {
 		const { transcript, subtitleType } = await tryDownloadSubtitle(
@@ -590,12 +586,20 @@ async function fetchTranscriptAndMetadata(
 	url: string,
 	lang: string | undefined,
 ): Promise<{ transcript: Transcript; metadata: VideoMetadata }> {
+	// Validate before any yt-dlp invocation so non-video YouTube URLs
+	// (channels, playlists, the bare homepage) get an immediate 400
+	// instead of a slow 5xx from a doomed info-extraction call.
+	const videoId = extractVideoId(url);
+	if (!videoId) {
+		throw new TranscriptError("Could not extract video ID", "INVALID_URL", 400);
+	}
+
 	// Run yt-dlp sequentially on the same URL — concurrent invocations against
 	// one video can compound YouTube's per-IP rate-limiting.
 	const info = await getVideoInfo(url);
 	const transcript = lang
-		? await fetchTranscript(url, { lang })
-		: await fetchTranscript(url, { subtitleInfo: info.subtitles });
+		? await fetchTranscript(url, videoId, { lang })
+		: await fetchTranscript(url, videoId, { subtitleInfo: info.subtitles });
 	return { transcript, metadata: info.metadata };
 }
 
