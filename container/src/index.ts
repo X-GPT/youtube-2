@@ -623,16 +623,20 @@ async function fetchTranscriptAndMetadata(
 	}
 
 	// yt-dlp calls stay sequential per video — concurrent invocations against
-	// one URL compound YouTube's per-IP rate-limiting.
+	// one URL compound YouTube's per-IP rate-limiting. Each phase carries an
+	// explicit budget so total wall-clock stays under the 60s server
+	// idleTimeout without a separate outer timer racing the inner ones (a
+	// `withTimeout` is a race, not a cancel — an outer timer firing before an
+	// inner `.catch()` runs would defeat the best-effort fallback below).
 	if (lang) {
-		// Explicit-lang doesn't need the subtitle listing, so download the
-		// targeted transcript first and treat the metadata fetch as best-effort.
-		// A transient metadata failure shouldn't poison a working transcript.
-		const transcript = await fetchTranscript(url, videoId, { lang });
-		// Bound the metadata fetch with its own short budget so a stalled info
-		// call cannot let the outer 50s timer reject a request whose transcript
-		// already succeeded — withTimeout is a race, not a cancel, and the outer
-		// rejection would defeat this .catch().
+		// Explicit-lang skips the subtitle listing: download the targeted
+		// transcript first, then fetch metadata best-effort within its own slot
+		// so a transient metadata failure can't poison a working transcript.
+		const transcript = await withTimeout(
+			fetchTranscript(url, videoId, { lang }),
+			40000,
+			"Transcript download timed out",
+		);
 		const metadata = await withTimeout(
 			getVideoInfo(url),
 			10000,
@@ -649,17 +653,18 @@ async function fetchTranscriptAndMetadata(
 		return { transcript, metadata };
 	}
 
-	// Auto-detect needs the subtitle listing for priority selection. Bound the
-	// info phase with its own budget so a slow info call can't starve the
-	// transcript download phase of the outer 50s budget.
+	// Auto-detect needs the subtitle listing for priority selection. Split the
+	// budget so a slow info call can't starve the transcript download phase.
 	const info = await withTimeout(
 		getVideoInfo(url),
 		15000,
 		"Video info fetch timed out",
 	);
-	const transcript = await fetchTranscript(url, videoId, {
-		subtitleInfo: info.subtitles,
-	});
+	const transcript = await withTimeout(
+		fetchTranscript(url, videoId, { subtitleInfo: info.subtitles }),
+		35000,
+		"Transcript download timed out",
+	);
 	return { transcript, metadata: info.metadata };
 }
 
@@ -691,10 +696,11 @@ app.get("/transcript", async (c) => {
 
 	try {
 		console.log({ message: "Downloading transcript" });
-		const { transcript, metadata } = await withTimeout(
-			fetchTranscriptAndMetadata(url, lang),
-			50000, // must stay under server idleTimeout (60s)
-			"Transcript download timed out",
+		// Per-phase budgets inside fetchTranscriptAndMetadata sum to ≤50s,
+		// well under the 60s server idleTimeout.
+		const { transcript, metadata } = await fetchTranscriptAndMetadata(
+			url,
+			lang,
 		);
 		console.log({
 			message: "Downloaded transcript",
