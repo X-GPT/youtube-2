@@ -610,10 +610,35 @@ const EMPTY_METADATA: VideoMetadata = {
 	author: "",
 };
 
+// Best-effort metadata fetch: swallows known upstream failures (timeout,
+// rate-limit, parse error) so they don't poison a working transcript, but
+// rethrows anything that isn't a TranscriptError so programmer bugs still
+// surface instead of being silently masked as empty metadata.
+async function tryFetchMetadata(
+	url: string,
+	budgetMs: number,
+): Promise<VideoMetadata> {
+	try {
+		const info = await withTimeout(
+			getVideoInfo(url),
+			budgetMs,
+			"Metadata fetch timed out",
+		);
+		return info.metadata;
+	} catch (error) {
+		if (!(error instanceof TranscriptError)) throw error;
+		console.warn({
+			message: "Metadata fetch failed; returning transcript without it",
+			code: error.code,
+			error: error.message,
+		});
+		return EMPTY_METADATA;
+	}
+}
+
 // Explicit-lang path: transcript is required, metadata is best-effort.
-// Download the targeted transcript first so a metadata failure (timeout,
-// rate limit, parse error) degrades to EMPTY_METADATA via the .catch
-// instead of poisoning a working transcript.
+// Download the targeted transcript first so a metadata-side failure can't
+// poison a working transcript.
 async function fetchExplicit(
 	url: string,
 	videoId: string,
@@ -624,19 +649,7 @@ async function fetchExplicit(
 		40000,
 		"Transcript download timed out",
 	);
-	const metadata = await withTimeout(
-		getVideoInfo(url),
-		10000,
-		"Metadata fetch timed out",
-	)
-		.then((info) => info.metadata)
-		.catch((error) => {
-			console.warn({
-				message: "Metadata fetch failed; returning transcript without it",
-				error: error instanceof Error ? error.message : String(error),
-			});
-			return EMPTY_METADATA;
-		});
+	const metadata = await tryFetchMetadata(url, 10000);
 	return { transcript, metadata };
 }
 
