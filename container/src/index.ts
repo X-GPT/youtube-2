@@ -183,18 +183,40 @@ async function getVideoInfo(
 	}
 
 	const output = result.stdout.toString().trim();
-	const data = JSON.parse(output);
+	if (!output) {
+		throw new TranscriptError(
+			"yt-dlp returned empty info output",
+			"INVALID_RESPONSE",
+			502,
+		);
+	}
+
+	let data: Record<string, unknown>;
+	try {
+		const parsed = JSON.parse(output);
+		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+			throw new Error("not an object");
+		}
+		data = parsed as Record<string, unknown>;
+	} catch {
+		throw new TranscriptError(
+			`yt-dlp returned malformed info output: ${output.slice(0, 200)}`,
+			"INVALID_RESPONSE",
+			502,
+		);
+	}
 
 	return {
 		subtitles: {
-			language: data.language ?? null,
-			subtitles: data.subtitles ?? {},
-			automatic_captions: data.automatic_captions ?? {},
+			language: (data.language as string | null) ?? null,
+			subtitles: (data.subtitles as Record<string, unknown[]>) ?? {},
+			automatic_captions:
+				(data.automatic_captions as Record<string, unknown[]>) ?? {},
 		},
 		metadata: {
-			description: data.description ?? "",
-			view_count: data.view_count ?? 0,
-			author: data.uploader ?? "",
+			description: (data.description as string) ?? "",
+			view_count: (data.view_count as number) ?? 0,
+			author: (data.uploader as string) ?? "",
 		},
 	};
 }
@@ -582,6 +604,12 @@ async function fetchTranscript(
 	}
 }
 
+const EMPTY_METADATA: VideoMetadata = {
+	description: "",
+	view_count: 0,
+	author: "",
+};
+
 async function fetchTranscriptAndMetadata(
 	url: string,
 	lang: string | undefined,
@@ -594,12 +622,36 @@ async function fetchTranscriptAndMetadata(
 		throw new TranscriptError("Could not extract video ID", "INVALID_URL", 400);
 	}
 
-	// Run yt-dlp sequentially on the same URL — concurrent invocations against
-	// one video can compound YouTube's per-IP rate-limiting.
-	const info = await getVideoInfo(url);
-	const transcript = lang
-		? await fetchTranscript(url, videoId, { lang })
-		: await fetchTranscript(url, videoId, { subtitleInfo: info.subtitles });
+	// yt-dlp calls stay sequential per video — concurrent invocations against
+	// one URL compound YouTube's per-IP rate-limiting.
+	if (lang) {
+		// Explicit-lang doesn't need the subtitle listing, so download the
+		// targeted transcript first and treat the metadata fetch as best-effort.
+		// A transient metadata failure shouldn't poison a working transcript.
+		const transcript = await fetchTranscript(url, videoId, { lang });
+		const metadata = await getVideoInfo(url)
+			.then((info) => info.metadata)
+			.catch((error) => {
+				console.warn({
+					message: "Metadata fetch failed; returning transcript without it",
+					error: error instanceof Error ? error.message : String(error),
+				});
+				return EMPTY_METADATA;
+			});
+		return { transcript, metadata };
+	}
+
+	// Auto-detect needs the subtitle listing for priority selection. Bound the
+	// info phase with its own budget so a slow info call can't starve the
+	// transcript download phase of the outer 50s budget.
+	const info = await withTimeout(
+		getVideoInfo(url),
+		15000,
+		"Video info fetch timed out",
+	);
+	const transcript = await fetchTranscript(url, videoId, {
+		subtitleInfo: info.subtitles,
+	});
 	return { transcript, metadata: info.metadata };
 }
 
