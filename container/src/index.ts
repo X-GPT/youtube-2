@@ -629,7 +629,15 @@ async function fetchTranscriptAndMetadata(
 		// targeted transcript first and treat the metadata fetch as best-effort.
 		// A transient metadata failure shouldn't poison a working transcript.
 		const transcript = await fetchTranscript(url, videoId, { lang });
-		const metadata = await getVideoInfo(url)
+		// Bound the metadata fetch with its own short budget so a stalled info
+		// call cannot let the outer 50s timer reject a request whose transcript
+		// already succeeded — withTimeout is a race, not a cancel, and the outer
+		// rejection would defeat this .catch().
+		const metadata = await withTimeout(
+			getVideoInfo(url),
+			10000,
+			"Metadata fetch timed out",
+		)
 			.then((info) => info.metadata)
 			.catch((error) => {
 				console.warn({
