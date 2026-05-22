@@ -610,6 +610,56 @@ const EMPTY_METADATA: VideoMetadata = {
 	author: "",
 };
 
+// Explicit-lang path: transcript is required, metadata is best-effort.
+// Download the targeted transcript first so a metadata failure (timeout,
+// rate limit, parse error) degrades to EMPTY_METADATA via the .catch
+// instead of poisoning a working transcript.
+async function fetchExplicit(
+	url: string,
+	videoId: string,
+	lang: string,
+): Promise<{ transcript: Transcript; metadata: VideoMetadata }> {
+	const transcript = await withTimeout(
+		fetchTranscript(url, videoId, { lang }),
+		40000,
+		"Transcript download timed out",
+	);
+	const metadata = await withTimeout(
+		getVideoInfo(url),
+		10000,
+		"Metadata fetch timed out",
+	)
+		.then((info) => info.metadata)
+		.catch((error) => {
+			console.warn({
+				message: "Metadata fetch failed; returning transcript without it",
+				error: error instanceof Error ? error.message : String(error),
+			});
+			return EMPTY_METADATA;
+		});
+	return { transcript, metadata };
+}
+
+// Auto-detect path: info call is the data dependency for language priority
+// selection, and its by-product carries the metadata. Both phases are
+// required — a failure in either fails the request.
+async function fetchAutoDetect(
+	url: string,
+	videoId: string,
+): Promise<{ transcript: Transcript; metadata: VideoMetadata }> {
+	const info = await withTimeout(
+		getVideoInfo(url),
+		15000,
+		"Video info fetch timed out",
+	);
+	const transcript = await withTimeout(
+		fetchTranscript(url, videoId, { subtitleInfo: info.subtitles }),
+		35000,
+		"Transcript download timed out",
+	);
+	return { transcript, metadata: info.metadata };
+}
+
 async function fetchTranscriptAndMetadata(
 	url: string,
 	lang: string | undefined,
@@ -623,49 +673,12 @@ async function fetchTranscriptAndMetadata(
 	}
 
 	// yt-dlp calls stay sequential per video — concurrent invocations against
-	// one URL compound YouTube's per-IP rate-limiting. Each phase carries an
-	// explicit budget so total wall-clock stays under the 60s server
-	// idleTimeout without a separate outer timer racing the inner ones (a
-	// `withTimeout` is a race, not a cancel — an outer timer firing before an
-	// inner `.catch()` runs would defeat the best-effort fallback below).
-	if (lang) {
-		// Explicit-lang skips the subtitle listing: download the targeted
-		// transcript first, then fetch metadata best-effort within its own slot
-		// so a transient metadata failure can't poison a working transcript.
-		const transcript = await withTimeout(
-			fetchTranscript(url, videoId, { lang }),
-			40000,
-			"Transcript download timed out",
-		);
-		const metadata = await withTimeout(
-			getVideoInfo(url),
-			10000,
-			"Metadata fetch timed out",
-		)
-			.then((info) => info.metadata)
-			.catch((error) => {
-				console.warn({
-					message: "Metadata fetch failed; returning transcript without it",
-					error: error instanceof Error ? error.message : String(error),
-				});
-				return EMPTY_METADATA;
-			});
-		return { transcript, metadata };
-	}
-
-	// Auto-detect needs the subtitle listing for priority selection. Split the
-	// budget so a slow info call can't starve the transcript download phase.
-	const info = await withTimeout(
-		getVideoInfo(url),
-		15000,
-		"Video info fetch timed out",
-	);
-	const transcript = await withTimeout(
-		fetchTranscript(url, videoId, { subtitleInfo: info.subtitles }),
-		35000,
-		"Transcript download timed out",
-	);
-	return { transcript, metadata: info.metadata };
+	// one URL compound YouTube's per-IP rate-limiting. Each phase inside the
+	// helpers carries its own withTimeout so a slow phase can't race the next
+	// one's .catch (withTimeout is a Promise race, not a cancel).
+	return lang
+		? fetchExplicit(url, videoId, lang)
+		: fetchAutoDetect(url, videoId);
 }
 
 // Health check endpoint
