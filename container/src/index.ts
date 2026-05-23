@@ -168,21 +168,64 @@ function parseYtDlpError(stderr: string): TranscriptError {
 	return new TranscriptError(`yt-dlp error: ${stderr.trim()}`, "UNKNOWN", 500);
 }
 
+// Spawn yt-dlp with an AbortSignal so withTimeout can SIGTERM the subprocess
+// when its budget expires — otherwise the race winner's reject only frees the
+// JS frame, while yt-dlp keeps consuming CPU and YouTube rate-limit budget.
+async function runYtDlp(
+	args: string[],
+	signal: AbortSignal,
+): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+	const proc = Bun.spawn(["/usr/local/bin/yt-dlp", ...args], {
+		stdout: "pipe",
+		stderr: "pipe",
+	});
+	const onAbort = () => {
+		try {
+			proc.kill();
+		} catch {
+			// already exited
+		}
+	};
+	if (signal.aborted) onAbort();
+	else signal.addEventListener("abort", onAbort, { once: true });
+
+	try {
+		const [stdout, stderr, exitCode] = await Promise.all([
+			new Response(proc.stdout).text(),
+			new Response(proc.stderr).text(),
+			proc.exited,
+		]);
+		return { exitCode, stdout, stderr };
+	} finally {
+		signal.removeEventListener("abort", onAbort);
+	}
+}
+
 // Subtitle listing and video metadata both come from yt-dlp's info extractor
 // on the same URL, so we fetch them together to avoid a redundant round-trip.
 async function getVideoInfo(
 	url: string,
+	signal: AbortSignal,
 ): Promise<{ subtitles: SubtitleInfo; metadata: VideoMetadata }> {
-	const result =
-		await $`/usr/local/bin/yt-dlp --sleep-requests 1 --skip-download --no-warnings --no-playlist --print "%(.{language,subtitles,automatic_captions,description,view_count,uploader})#j" ${url}`
-			.nothrow()
-			.quiet();
+	const result = await runYtDlp(
+		[
+			"--sleep-requests",
+			"1",
+			"--skip-download",
+			"--no-warnings",
+			"--no-playlist",
+			"--print",
+			"%(.{language,subtitles,automatic_captions,description,view_count,uploader})#j",
+			url,
+		],
+		signal,
+	);
 
 	if (result.exitCode !== 0) {
-		throw parseYtDlpError(result.stderr.toString());
+		throw parseYtDlpError(result.stderr);
 	}
 
-	const output = result.stdout.toString().trim();
+	const output = result.stdout.trim();
 	if (!output) {
 		throw new TranscriptError(
 			"yt-dlp returned empty info output",
@@ -295,19 +338,32 @@ function selectLanguagePriorities(info: SubtitleInfo): SelectedLanguage[] {
 	return results;
 }
 
-// Timeout wrapper
+// Timeout wrapper: owns an AbortController so the budget can actually cancel
+// the work it wraps, not just unblock the awaiter. The factory receives the
+// signal and is expected to plumb it to anything cancellable (subprocesses,
+// fetches). On timeout we abort + normalize whatever the factory threw into
+// a TIMEOUT TranscriptError so the route handler maps it to 504.
 async function withTimeout<T>(
-	promise: Promise<T>,
+	factory: (signal: AbortSignal) => Promise<T>,
 	timeoutMs: number,
 	errorMessage: string,
 ): Promise<T> {
-	const timeout = new Promise<never>((_, reject) => {
-		setTimeout(
-			() => reject(new TranscriptError(errorMessage, "TIMEOUT", 504)),
-			timeoutMs,
-		);
-	});
-	return Promise.race([promise, timeout]);
+	const controller = new AbortController();
+	let timedOut = false;
+	const timer = setTimeout(() => {
+		timedOut = true;
+		controller.abort();
+	}, timeoutMs);
+	try {
+		return await factory(controller.signal);
+	} catch (error) {
+		if (timedOut) {
+			throw new TranscriptError(errorMessage, "TIMEOUT", 504);
+		}
+		throw error;
+	} finally {
+		clearTimeout(timer);
+	}
 }
 
 // Find subtitle file in output directory
@@ -380,6 +436,7 @@ async function tryDownloadSubtitle(
 	url: string,
 	videoId: string,
 	targetLang: string,
+	signal: AbortSignal,
 ): Promise<{
 	transcript: string;
 	subtitleType: "manual" | "auto";
@@ -388,23 +445,28 @@ async function tryDownloadSubtitle(
 	await $`mkdir -p ${outputDir}`;
 
 	try {
-		const result = await $`/usr/local/bin/yt-dlp \
-      --sleep-requests 1 \
-      --write-sub \
-      --write-auto-sub \
-      --sub-lang ${targetLang} \
-      --sub-format vtt \
-      --skip-download \
-      --no-warnings \
-      --no-playlist \
-      -o "${outputDir}/%(id)s" \
-      ${url}`
-			.nothrow()
-			.quiet();
+		const result = await runYtDlp(
+			[
+				"--sleep-requests",
+				"1",
+				"--write-sub",
+				"--write-auto-sub",
+				"--sub-lang",
+				targetLang,
+				"--sub-format",
+				"vtt",
+				"--skip-download",
+				"--no-warnings",
+				"--no-playlist",
+				"-o",
+				`${outputDir}/%(id)s`,
+				url,
+			],
+			signal,
+		);
 
 		if (result.exitCode !== 0) {
-			const stderr = result.stderr.toString();
-			throw parseYtDlpError(stderr);
+			throw parseYtDlpError(result.stderr);
 		}
 
 		const subtitleFile = await findSubtitleFile(outputDir, videoId, targetLang);
@@ -434,6 +496,7 @@ async function tryDownloadOriginalSubtitle(
 	url: string,
 	videoId: string,
 	originalLang: string,
+	signal: AbortSignal,
 ): Promise<{
 	transcript: string;
 	subtitleType: "manual" | "auto";
@@ -446,22 +509,27 @@ async function tryDownloadOriginalSubtitle(
 	const baseLang = originalLang.split("-")[0];
 
 	try {
-		const result = await $`/usr/local/bin/yt-dlp \
-      --sleep-requests 1 \
-      --write-auto-sub \
-      --sub-lang ${baseLang} \
-      --sub-format vtt \
-      --skip-download \
-      --no-warnings \
-      --no-playlist \
-      -o "${outputDir}/%(id)s" \
-      ${url}`
-			.nothrow()
-			.quiet();
+		const result = await runYtDlp(
+			[
+				"--sleep-requests",
+				"1",
+				"--write-auto-sub",
+				"--sub-lang",
+				baseLang,
+				"--sub-format",
+				"vtt",
+				"--skip-download",
+				"--no-warnings",
+				"--no-playlist",
+				"-o",
+				`${outputDir}/%(id)s`,
+				url,
+			],
+			signal,
+		);
 
 		if (result.exitCode !== 0) {
-			const stderr = result.stderr.toString();
-			throw parseYtDlpError(stderr);
+			throw parseYtDlpError(result.stderr);
 		}
 
 		const subtitleFile = await findAnySubtitleFile(outputDir, videoId);
@@ -507,6 +575,7 @@ async function fetchTranscript(
 	url: string,
 	videoId: string,
 	args: FetchTranscriptArgs,
+	signal: AbortSignal,
 ): Promise<Transcript> {
 	// When a specific language is requested, try it directly (no fallback)
 	if ("lang" in args) {
@@ -514,6 +583,7 @@ async function fetchTranscript(
 			url,
 			videoId,
 			args.lang,
+			signal,
 		);
 		return {
 			text: transcript,
@@ -551,6 +621,7 @@ async function fetchTranscript(
 				url,
 				videoId,
 				selected.lang,
+				signal,
 			);
 			return {
 				text: transcript,
@@ -577,6 +648,7 @@ async function fetchTranscript(
 			url,
 			videoId,
 			subtitleInfo.language ?? "en",
+			signal,
 		);
 		return {
 			text: result.transcript,
@@ -620,7 +692,7 @@ async function tryFetchMetadata(
 ): Promise<VideoMetadata> {
 	try {
 		const info = await withTimeout(
-			getVideoInfo(url),
+			(signal) => getVideoInfo(url, signal),
 			budgetMs,
 			"Metadata fetch timed out",
 		);
@@ -645,7 +717,7 @@ async function fetchExplicit(
 	lang: string,
 ): Promise<{ transcript: Transcript; metadata: VideoMetadata }> {
 	const transcript = await withTimeout(
-		fetchTranscript(url, videoId, { lang }),
+		(signal) => fetchTranscript(url, videoId, { lang }, signal),
 		40000,
 		"Transcript download timed out",
 	);
@@ -661,12 +733,13 @@ async function fetchAutoDetect(
 	videoId: string,
 ): Promise<{ transcript: Transcript; metadata: VideoMetadata }> {
 	const info = await withTimeout(
-		getVideoInfo(url),
+		(signal) => getVideoInfo(url, signal),
 		15000,
 		"Video info fetch timed out",
 	);
 	const transcript = await withTimeout(
-		fetchTranscript(url, videoId, { subtitleInfo: info.subtitles }),
+		(signal) =>
+			fetchTranscript(url, videoId, { subtitleInfo: info.subtitles }, signal),
 		35000,
 		"Transcript download timed out",
 	);
@@ -687,8 +760,9 @@ async function fetchTranscriptAndMetadata(
 
 	// yt-dlp calls stay sequential per video — concurrent invocations against
 	// one URL compound YouTube's per-IP rate-limiting. Each phase inside the
-	// helpers carries its own withTimeout so a slow phase can't race the next
-	// one's .catch (withTimeout is a Promise race, not a cancel).
+	// helpers carries its own withTimeout, which now actually cancels the
+	// underlying yt-dlp subprocess via AbortSignal on budget expiry instead
+	// of just unblocking the awaiter.
 	return lang
 		? fetchExplicit(url, videoId, lang)
 		: fetchAutoDetect(url, videoId);
