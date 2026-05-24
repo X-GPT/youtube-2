@@ -97,7 +97,16 @@ app.use(
 	"/*",
 	bearerAuth({
 		verifyToken: (token, c) => {
-			return token === c.env.API_KEY;
+			const ok = token === c.env.API_KEY;
+			if (!ok) {
+				console.warn({
+					message: "Bearer auth failed",
+					path: c.req.path,
+					tokenPrefix: token.slice(0, 6),
+					tokenLength: token.length,
+				});
+			}
+			return ok;
 		},
 	}),
 );
@@ -107,7 +116,19 @@ const schema = z.object({
 	lang: z.string().optional(), // If omitted, container will auto-detect
 });
 
-app.get("/", sValidator("query", schema), async (c) => {
+app.get(
+	"/",
+	sValidator("query", schema, (result, c) => {
+		if (!result.success) {
+			console.warn({
+				message: "Query schema validation failed",
+				path: c.req.path,
+				query: c.req.query(),
+				issues: result.error,
+			});
+		}
+	}),
+	async (c) => {
 	try {
 		const { url, lang } = c.req.valid("query");
 
