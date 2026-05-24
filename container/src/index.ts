@@ -622,7 +622,7 @@ app.get("/transcript", async (c) => {
 		console.log({ message: "Downloading transcript" });
 		const result = await withTimeout(
 			downloadAndParseTranscript(url, lang),
-			30000, // 30 second timeout
+			60000, // 60 second timeout
 			"Transcript download timed out",
 		);
 		console.log({ message: "Downloading transcript", result });
@@ -631,7 +631,7 @@ app.get("/transcript", async (c) => {
 		console.log({ message: "Fetching video metadata" });
 		const videoMetadata = await withTimeout(
 			getVideoMetadata(result.videoId),
-			15000, // 15 second timeout for metadata
+			30000, // 30 second timeout for metadata
 			"Metadata fetch timed out",
 		);
 		console.log({ message: "Video metadata", videoMetadata });
@@ -667,5 +667,5 @@ app.get("/transcript", async (c) => {
 
 export default {
 	fetch: app.fetch,
-	idleTimeout: 60, // 60 seconds to handle slow yt-dlp operations
+	idleTimeout: 120, // 120 seconds to handle slow yt-dlp operations
 };
