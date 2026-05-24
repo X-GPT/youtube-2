@@ -90,6 +90,8 @@ async function loadURLMeta(env: CloudflareBindings, url: string) {
 
 const app = new Hono<{ Bindings: CloudflareBindings }>();
 
+app.get("/health", (c) => c.json({ status: "ok" }));
+
 // Middleware to verify the bearer token
 app.use(
 	"/*",
