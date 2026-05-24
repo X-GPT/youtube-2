@@ -95,7 +95,7 @@ app.get("/health", (c) => c.json({ status: "ok" }));
 // Middleware to verify the bearer token
 app.use(
 	"/*",
-	bearerAuth({
+	bearerAuth<{ Bindings: CloudflareBindings }>({
 		verifyToken: (token, c) => {
 			const ok = token === c.env.API_KEY;
 			if (!ok) {
@@ -129,95 +129,96 @@ app.get(
 		}
 	}),
 	async (c) => {
-	try {
-		const { url, lang } = c.req.valid("query");
-
-		// Get a random container instance for load balancing
-		const container = await getRandom(c.env.MY_CONTAINER, INSTANCE_COUNT);
-
-		// Build URL with query params
-		const transcriptUrl = new URL("/transcript", "http://container");
-		transcriptUrl.searchParams.set("url", url);
-		// Only set lang if explicitly provided
-		if (lang) {
-			transcriptUrl.searchParams.set("lang", lang);
-		}
-
-		console.log({
-			message: "Fetching transcript from container",
-			transcriptUrl: transcriptUrl.toString(),
-		});
-		// Fetch from container
-		const response = await container.fetch(transcriptUrl.toString());
-		const text = await response.text();
-		if (response.ok) {
-			console.log({
-				message: "Response from container",
-				status: response.status,
-				statusText: response.statusText,
-				ok: response.ok,
-				headers: Object.fromEntries(response.headers),
-			});
-		} else {
-			console.error({
-				message: "Response from container",
-				status: response.status,
-				statusText: response.statusText,
-				ok: response.ok,
-				headers: Object.fromEntries(response.headers),
-				body: text,
-			});
-		}
-
-		let data: ContainerResponse;
 		try {
-			data = JSON.parse(text);
-		} catch {
-			return c.json(
-				{ error: text || "Container returned invalid response" },
-				500,
-			);
-		}
+			const { url, lang } = c.req.valid("query");
 
-		const status = response.status as ContentfulStatusCode;
+			// Get a random container instance for load balancing
+			const container = await getRandom(c.env.MY_CONTAINER, INSTANCE_COUNT);
 
-		if (data.success === false) {
-			return c.json({ error: data.error, code: data.code }, status);
-		}
+			// Build URL with query params
+			const transcriptUrl = new URL("/transcript", "http://container");
+			transcriptUrl.searchParams.set("url", url);
+			// Only set lang if explicitly provided
+			if (lang) {
+				transcriptUrl.searchParams.set("lang", lang);
+			}
 
-		if (typeof data.transcript !== "string") {
-			return c.json(
-				{ error: "Container returned malformed success response" },
-				500,
-			);
-		}
+			console.log({
+				message: "Fetching transcript from container",
+				transcriptUrl: transcriptUrl.toString(),
+			});
+			// Fetch from container
+			const response = await container.fetch(transcriptUrl.toString());
+			const text = await response.text();
+			if (response.ok) {
+				console.log({
+					message: "Response from container",
+					status: response.status,
+					statusText: response.statusText,
+					ok: response.ok,
+					headers: Object.fromEntries(response.headers),
+				});
+			} else {
+				console.error({
+					message: "Response from container",
+					status: response.status,
+					statusText: response.statusText,
+					ok: response.ok,
+					headers: Object.fromEntries(response.headers),
+					body: text,
+				});
+			}
 
-		const { thumbnail_url, title } = await loadURLMeta(c.env, url);
-		const metadata: {
-			thumbnail_url?: string;
-			title: string;
-			source: string;
-			description?: string;
-			view_count?: number;
-			author?: string;
-		} = {
-			source: extractVideoId(url),
-			thumbnail_url,
-			title,
-			description: data.metadata?.description,
-			view_count: data.metadata?.view_count,
-			author: data.metadata?.author,
-		};
+			let data: ContainerResponse;
+			try {
+				data = JSON.parse(text);
+			} catch {
+				return c.json(
+					{ error: text || "Container returned invalid response" },
+					500,
+				);
+			}
 
-		return c.json({ content: data.transcript, metadata }, status);
-	} catch (e) {
-		if (e instanceof Error) {
+			const status = response.status as ContentfulStatusCode;
+
+			if (data.success === false) {
+				return c.json({ error: data.error, code: data.code }, status);
+			}
+
+			if (typeof data.transcript !== "string") {
+				return c.json(
+					{ error: "Container returned malformed success response" },
+					500,
+				);
+			}
+
+			const { thumbnail_url, title } = await loadURLMeta(c.env, url);
+			const metadata: {
+				thumbnail_url?: string;
+				title: string;
+				source: string;
+				description?: string;
+				view_count?: number;
+				author?: string;
+			} = {
+				source: extractVideoId(url),
+				thumbnail_url,
+				title,
+				description: data.metadata?.description,
+				view_count: data.metadata?.view_count,
+				author: data.metadata?.author,
+			};
+
+			return c.json({ content: data.transcript, metadata }, status);
+		} catch (e) {
+			if (e instanceof Error) {
+				console.error(e);
+				return c.json({ error: e.message }, 500);
+			}
 			console.error(e);
-			return c.json({ error: e.message }, 500);
+			return c.json({ error: "Unknown error" }, 500);
 		}
-		console.error(e);
-		return c.json({ error: "Unknown error" }, 500);
-	}
-});
+	},
+);
 
 export default app;
