@@ -37,7 +37,7 @@
 	},
 	"containers": [
 		{
-			"max_instances": 10,
+			"max_instances": 50,
 			"class_name": "MyContainer",
 			"image": "./Dockerfile",
 			"instance_type": "standard-1"
