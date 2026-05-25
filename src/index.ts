@@ -6,7 +6,7 @@ import { bearerAuth } from "hono/bearer-auth";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import z from "zod";
 
-const INSTANCE_COUNT = 10;
+const INSTANCE_COUNT = 50;
 
 type ContainerResponse =
 	| {
@@ -26,7 +26,7 @@ type ContainerResponse =
 
 export class MyContainer extends Container {
 	defaultPort = 3000;
-	sleepAfter = "5m";
+	sleepAfter = "1m";
 }
 
 function extractVideoId(url: string): string {
